@@ -21,12 +21,14 @@ class InvoiceItem extends Model
     ];
 
     protected $casts = [
-        'quantity' => 'integer',
+        'quantity'   => 'integer',
         'unit_price' => 'decimal:2',
-        'tax_rate' => 'decimal:2',
+        'tax_rate'   => 'decimal:2',
         'tax_amount' => 'decimal:2',
-        'total' => 'decimal:2',
+        'total'      => 'decimal:2',
     ];
+
+    // ─── Relationships ────────────────────────────────────────────────────────
 
     public function invoice(): BelongsTo
     {
@@ -38,5 +40,3 @@ class InvoiceItem extends Model
         return $this->belongsTo(Product::class);
     }
 }
-
-

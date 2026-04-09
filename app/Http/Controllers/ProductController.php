@@ -2,130 +2,114 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\Product\StoreProductRequest;
+use App\Http\Requests\Product\UpdateProductRequest;
 use App\Models\Product;
+use App\Traits\ApiResponse;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Validator;
 
 class ProductController extends Controller
 {
-    public function index(Request $request)
+    use ApiResponse;
+
+    /**
+     * GET /api/products
+     * Query params: category_id, status, low_stock, search
+     */
+    public function index(Request $request): JsonResponse
     {
-        $user = $request->user();
-        $category = $request->query('category');
-        $lowStock = $request->query('low_stock') === 'true';
+        $user  = $request->user();
+        $query = Product::where('user_id', $user->id)
+            ->with(['productCategory:id,name', 'unit:id,name,short_name']);
 
-        $query = Product::where('user_id', $user->id);
+        if ($categoryId = $request->query('category_id')) {
+            $query->where('category_id', $categoryId);
+        }
 
-        if ($category) {
+        // Legacy category string filter
+        if ($category = $request->query('category')) {
             $query->where('category', $category);
         }
 
-        if ($lowStock) {
+        if ($status = $request->query('status')) {
+            if (in_array($status, ['active', 'inactive'], true)) {
+                $query->where('status', $status);
+            }
+        }
+
+        if ($request->boolean('low_stock')) {
             $query->whereRaw('stock_quantity <= low_stock_threshold');
+        }
+
+        if ($search = $request->query('search')) {
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                  ->orWhere('sku', 'like', "%{$search}%")
+                  ->orWhere('barcode', 'like', "%{$search}%");
+            });
         }
 
         $products = $query->orderBy('name')->get();
 
-        return response()->json([
-            'success' => true,
-            'data' => $products
-        ]);
+        return $this->successResponse($products, 'Products retrieved successfully');
     }
 
-    public function store(Request $request)
+    /**
+     * POST /api/products
+     */
+    public function store(StoreProductRequest $request): JsonResponse
     {
-        $validator = Validator::make($request->all(), [
-            'name' => 'required|string|max:255',
-            'category' => 'nullable|string|max:255',
-            'purchase_price' => 'nullable|numeric|min:0',
-            'selling_price' => 'nullable|numeric|min:0',
-            'stock_quantity' => 'nullable|integer|min:0',
-            'low_stock_threshold' => 'nullable|integer|min:0',
-            'tax_rate' => 'nullable|numeric|min:0|max:100',
-        ]);
+        $data = $request->validated();
 
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Validation failed',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        $product = Product::create([
-            'user_id' => $request->user()->id,
-            'name' => $request->name,
-            'category' => $request->category,
-            'purchase_price' => $request->purchase_price ?? 0,
-            'selling_price' => $request->selling_price ?? 0,
-            'stock_quantity' => $request->stock_quantity ?? 0,
-            'low_stock_threshold' => $request->low_stock_threshold ?? 10,
-            'tax_rate' => $request->tax_rate ?? 0,
-        ]);
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Product created successfully',
-            'data' => $product
-        ], 201);
-    }
-
-    public function show(Request $request, $id)
-    {
-        $product = Product::where('user_id', $request->user()->id)
-            ->with(['stockMovements'])
-            ->findOrFail($id);
-
-        return response()->json([
-            'success' => true,
-            'data' => $product
-        ]);
-    }
-
-    public function update(Request $request, $id)
-    {
-        $product = Product::where('user_id', $request->user()->id)->findOrFail($id);
-
-        $validator = Validator::make($request->all(), [
-            'name' => 'sometimes|required|string|max:255',
-            'category' => 'nullable|string|max:255',
-            'purchase_price' => 'nullable|numeric|min:0',
-            'selling_price' => 'nullable|numeric|min:0',
-            'stock_quantity' => 'nullable|integer|min:0',
-            'low_stock_threshold' => 'nullable|integer|min:0',
-            'tax_rate' => 'nullable|numeric|min:0|max:100',
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Validation failed',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        $product->update($request->only([
-            'name', 'category', 'purchase_price', 'selling_price',
-            'stock_quantity', 'low_stock_threshold', 'tax_rate'
+        $product = Product::create(array_merge($data, [
+            'user_id'             => $request->user()->id,
+            'stock_quantity'      => $data['stock_quantity']      ?? 0,
+            'low_stock_threshold' => $data['low_stock_threshold'] ?? 10,
+            'tax_rate'            => $data['tax_rate']            ?? 0,
+            'status'              => $data['status']              ?? 'active',
         ]));
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Product updated successfully',
-            'data' => $product
-        ]);
+        return $this->createdResponse(
+            $product->load(['productCategory:id,name', 'unit:id,name,short_name']),
+            'Product created successfully'
+        );
     }
 
-    public function destroy(Request $request, $id)
+    /**
+     * GET /api/products/{product}
+     */
+    public function show(Request $request, string $id): JsonResponse
+    {
+        $product = Product::where('user_id', $request->user()->id)
+            ->with(['productCategory:id,name', 'unit:id,name,short_name', 'stockMovements' => fn ($q) => $q->latest()->limit(20)])
+            ->findOrFail($id);
+
+        return $this->successResponse($product, 'Product retrieved successfully');
+    }
+
+    /**
+     * PUT /api/products/{product}
+     */
+    public function update(UpdateProductRequest $request, string $id): JsonResponse
     {
         $product = Product::where('user_id', $request->user()->id)->findOrFail($id);
-        $product->delete();
+        $product->update($request->validated());
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Product deleted successfully'
-        ]);
+        return $this->successResponse(
+            $product->fresh()->load(['productCategory:id,name', 'unit:id,name,short_name']),
+            'Product updated successfully'
+        );
+    }
+
+    /**
+     * DELETE /api/products/{product}
+     */
+    public function destroy(Request $request, string $id): JsonResponse
+    {
+        $product = Product::where('user_id', $request->user()->id)->findOrFail($id);
+        $product->delete(); // soft delete
+
+        return $this->successResponse(null, 'Product deleted successfully');
     }
 }
-
-

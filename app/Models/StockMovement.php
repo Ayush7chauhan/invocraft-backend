@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\StockMovementType;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -22,9 +23,12 @@ class StockMovement extends Model
     ];
 
     protected $casts = [
-        'quantity' => 'integer',
+        'quantity'   => 'integer',
         'unit_price' => 'decimal:2',
+        'type'       => StockMovementType::class,
     ];
+
+    // ─── Relationships ────────────────────────────────────────────────────────
 
     public function user(): BelongsTo
     {
@@ -36,5 +40,3 @@ class StockMovement extends Model
         return $this->belongsTo(Product::class);
     }
 }
-
-

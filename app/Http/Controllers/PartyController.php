@@ -2,156 +2,129 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\Party\StorePartyRequest;
+use App\Http\Requests\Party\UpdatePartyRequest;
 use App\Models\Party;
+use App\Traits\ApiResponse;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Validator;
+use Illuminate\Support\Facades\DB;
 
 class PartyController extends Controller
 {
-    public function index(Request $request)
+    use ApiResponse;
+
+    /**
+     * GET /api/parties
+     * Query params: type (customer|supplier|both), status, search
+     */
+    public function index(Request $request): JsonResponse
     {
-        $user = $request->user();
-        $type = $request->query('type'); // customer, supplier, both
-        
+        $user  = $request->user();
         $query = Party::where('user_id', $user->id);
-        
-        if ($type && in_array($type, ['customer', 'supplier', 'both'])) {
+
+        if ($type = $request->query('type')) {
             if ($type === 'both') {
                 $query->where('type', 'both');
-            } else {
-                $query->where(function($q) use ($type) {
+            } elseif (in_array($type, ['customer', 'supplier'], true)) {
+                $query->where(function ($q) use ($type) {
                     $q->where('type', $type)->orWhere('type', 'both');
                 });
             }
         }
-        
-        $parties = $query->orderBy('name')->get();
-        
-        return response()->json([
-            'success' => true,
-            'data' => $parties
-        ]);
-    }
 
-    public function store(Request $request)
-    {
-        $validator = Validator::make($request->all(), [
-            'name' => 'required|string|max:255',
-            'mobile' => 'nullable|string|max:15',
-            'address' => 'nullable|string|max:1000',
-            'type' => 'required|in:customer,supplier,both',
-            'opening_balance' => 'nullable|numeric',
-            'status' => 'nullable|in:active,inactive',
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Validation failed',
-                'errors' => $validator->errors()
-            ], 422);
+        if ($status = $request->query('status')) {
+            if (in_array($status, ['active', 'inactive'], true)) {
+                $query->where('status', $status);
+            }
         }
 
-        $party = Party::create([
-            'user_id' => $request->user()->id,
-            'name' => $request->name,
-            'mobile' => $request->mobile,
-            'address' => $request->address,
-            'type' => $request->type,
-            'opening_balance' => $request->opening_balance ?? 0,
-            'status' => $request->status ?? 'active',
-        ]);
+        if ($search = $request->query('search')) {
+            $query->where(function ($q) use ($search) {
+                $q->where('name', 'like', "%{$search}%")
+                  ->orWhere('mobile', 'like', "%{$search}%");
+            });
+        }
 
-        return response()->json([
-            'success' => true,
-            'message' => 'Party created successfully',
-            'data' => $party
-        ], 201);
+        $parties = $query->orderBy('name')->get();
+
+        return $this->successResponse($parties, 'Parties retrieved successfully');
     }
 
-    public function show(Request $request, $id)
+    /**
+     * POST /api/parties
+     */
+    public function store(StorePartyRequest $request): JsonResponse
+    {
+        $data = $request->validated();
+
+        $party = Party::create([
+            'user_id'         => $request->user()->id,
+            'name'            => $data['name'],
+            'mobile'          => $data['mobile']          ?? null,
+            'email'           => $data['email']           ?? null,
+            'address'         => $data['address']         ?? null,
+            'gst_number'      => $data['gst_number']      ?? null,
+            'type'            => $data['type'],
+            'opening_balance' => $data['opening_balance'] ?? 0,
+            'status'          => $data['status']          ?? 'active',
+        ]);
+
+        return $this->createdResponse($party, 'Party created successfully');
+    }
+
+    /**
+     * GET /api/parties/{id}
+     */
+    public function show(Request $request, string $id): JsonResponse
     {
         $party = Party::where('user_id', $request->user()->id)
             ->withCount(['transactions', 'invoices', 'payments'])
-            ->with(['transactions', 'invoices', 'payments'])
+            ->with(['transactions' => fn ($q) => $q->latest('transaction_date')->limit(10)])
             ->findOrFail($id);
 
-        return response()->json([
-            'success' => true,
-            'data' => $party
-        ]);
+        // Append computed balance
+        $party->append('balance');
+
+        return $this->successResponse($party, 'Party retrieved successfully');
     }
 
-    public function update(Request $request, $id)
+    /**
+     * PUT /api/parties/{id}
+     */
+    public function update(UpdatePartyRequest $request, string $id): JsonResponse
     {
         $party = Party::where('user_id', $request->user()->id)->findOrFail($id);
 
-        $validator = Validator::make($request->all(), [
-            'name' => 'sometimes|required|string|max:255',
-            'mobile' => 'nullable|string|max:15',
-            'address' => 'nullable|string|max:1000',
-            'type' => 'sometimes|in:customer,supplier,both',
-            'opening_balance' => 'nullable|numeric',
-            'status' => 'nullable|in:active,inactive',
-        ]);
+        $party->update($request->validated());
 
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Validation failed',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        $party->update($request->only([
-            'name', 'mobile', 'address', 'type', 'opening_balance', 'status'
-        ]));
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Party updated successfully',
-            'data' => $party
-        ]);
+        return $this->successResponse($party->fresh(), 'Party updated successfully');
     }
 
-    public function destroy(Request $request, $id)
+    /**
+     * DELETE /api/parties/{id}
+     */
+    public function destroy(Request $request, string $id): JsonResponse
     {
         $party = Party::where('user_id', $request->user()->id)
             ->withCount(['transactions', 'invoices', 'payments'])
             ->findOrFail($id);
 
-        // Count related records
-        $transactionCount = $party->transactions_count ?? $party->transactions()->count();
-        $invoiceCount = $party->invoices_count ?? $party->invoices()->count();
-        $paymentCount = $party->payments_count ?? $party->payments()->count();
-
-        // Delete all related transactions first (cascade delete)
-        if ($transactionCount > 0) {
-            $party->transactions()->delete();
-        }
-
-        // Delete all related invoices
-        if ($invoiceCount > 0) {
-            $party->invoices()->delete();
-        }
-
-        // Delete all related payments
-        if ($paymentCount > 0) {
+        DB::transaction(function () use ($party) {
             $party->payments()->delete();
-        }
+            $party->transactions()->delete();
+            // Invoices: cascade delete items via DB constraint; soft-delete invoice
+            $party->invoices()->each(function ($invoice) {
+                $invoice->items()->delete();
+                $invoice->delete();
+            });
+            $party->delete();
+        });
 
-        // Finally delete the party
-        $party->delete();
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Party and all associated data deleted successfully',
-            'data' => [
-                'deleted_transactions' => $transactionCount,
-                'deleted_invoices' => $invoiceCount,
-                'deleted_payments' => $paymentCount,
-            ]
-        ]);
+        return $this->successResponse([
+            'deleted_invoices'     => $party->invoices_count,
+            'deleted_transactions' => $party->transactions_count,
+            'deleted_payments'     => $party->payments_count,
+        ], 'Party and all associated data deleted successfully');
     }
 }
-

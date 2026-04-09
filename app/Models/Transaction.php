@@ -2,6 +2,7 @@
 
 namespace App\Models;
 
+use App\Enums\TransactionType;
 use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
 use Illuminate\Database\Eloquent\Relations\BelongsTo;
@@ -22,9 +23,12 @@ class Transaction extends Model
     ];
 
     protected $casts = [
-        'amount' => 'decimal:2',
+        'amount'           => 'decimal:2',
         'transaction_date' => 'date',
+        'type'             => TransactionType::class,
     ];
+
+    // ─── Relationships ────────────────────────────────────────────────────────
 
     public function user(): BelongsTo
     {
@@ -36,5 +40,3 @@ class Transaction extends Model
         return $this->belongsTo(Party::class);
     }
 }
-
-

@@ -2,333 +2,283 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\Auth\SendOtpRequest;
+use App\Http\Requests\Auth\SetupShopRequest;
+use App\Http\Requests\Auth\VerifyOtpRequest;
 use App\Models\Otp;
+use App\Models\Setting;
 use App\Models\User;
+use App\Traits\ApiResponse;
+use Carbon\Carbon;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Validator;
-use Carbon\Carbon;
 
 class AuthController extends Controller
 {
+    use ApiResponse;
+
+    // ─── OTP: Send ────────────────────────────────────────────────────────────
+
     /**
-     * Send OTP to mobile number
-     * OTP will be last 6 digits of mobile number
+     * POST /api/send-otp
+     *
+     * OTP = last 6 digits of the 10-digit mobile number (positions 4-9).
+     * Auth flow: mobile-only, no passwords.
      */
-    public function sendOtp(Request $request)
+    public function sendOtp(SendOtpRequest $request): JsonResponse
     {
-        $validator = Validator::make($request->all(), [
-            'mobile_number' => 'required|string|size:10|regex:/^[0-9]{10}$/',
-        ]);
+        $mobile = $request->validated()['mobile_number'];
 
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid mobile number',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        $mobileNumber = $request->mobile_number;
-        
-        // Generate OTP - last 6 digits of mobile number
-        // For 10-digit mobile (9876543210), last 6 digits are positions 4-9 (0-indexed)
-        // This gives us: 43210 (5 digits) - but we need 6
-        // So we'll take from position 4 with length 6: positions 4-9 = 6 characters
-        $otp = substr($mobileNumber, 4, 6);
-        
-        // Ensure it's exactly 6 digits
+        // OTP = characters at position 4 (0-indexed) through 9 = 6 chars
+        $otp = substr($mobile, 4, 6);
         if (strlen($otp) < 6) {
             $otp = str_pad($otp, 6, '0', STR_PAD_LEFT);
         }
-        
-        // Expires in 5 minutes
+
         $expiresAt = Carbon::now()->addMinutes(5);
 
-        // Invalidate previous OTPs for this mobile number
-        Otp::where('mobile_number', $mobileNumber)
+        // Invalidate all previous pending OTPs for this mobile
+        Otp::where('mobile_number', $mobile)
             ->where('is_verified', false)
             ->update(['is_verified' => true]);
 
-        // Create new OTP
-        $otpRecord = Otp::create([
-            'mobile_number' => $mobileNumber,
-            'otp' => $otp,
-            'is_verified' => false,
-            'expires_at' => $expiresAt,
+        Otp::create([
+            'mobile_number' => $mobile,
+            'otp'           => $otp,
+            'is_verified'   => false,
+            'expires_at'    => $expiresAt,
         ]);
 
-        // In production, send SMS here
-        // For now, we'll return the OTP in development
-        return response()->json([
-            'success' => true,
-            'message' => 'OTP sent successfully',
-            'data' => [
-                'mobile_number' => $mobileNumber,
-                // Remove this in production - only for development
-                'otp' => config('app.debug') ? $otp : null,
-                'expires_in' => 300, // 5 minutes in seconds
-            ]
-        ], 200);
+        // In production: dispatch SMS job here.
+        return $this->successResponse([
+            'mobile_number' => $mobile,
+            'otp'           => config('app.debug') ? $otp : null, // hide in production
+            'expires_in'    => 300,
+        ], 'OTP sent successfully');
     }
 
+    // ─── OTP: Verify ──────────────────────────────────────────────────────────
+
     /**
-     * Verify OTP
+     * POST /api/verify-otp
+     *
+     * Verifies the OTP. If user is not registered yet, returns
+     * requires_registration=true with no token (frontend routes to setup-shop).
+     * If already registered, returns the Bearer token immediately.
      */
-    public function verifyOtp(Request $request)
+    public function verifyOtp(VerifyOtpRequest $request): JsonResponse
     {
-        $validator = Validator::make($request->all(), [
-            'mobile_number' => 'required|string|size:10|regex:/^[0-9]{10}$/',
-            'otp' => 'required|string|size:6|regex:/^[0-9]{6}$/',
-        ]);
+        $data   = $request->validated();
+        $mobile = $data['mobile_number'];
+        $otp    = $data['otp'];
 
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid input',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        $mobileNumber = $request->mobile_number;
-        $otp = $request->otp;
-
-        // Find the latest unverified OTP
-        $otpRecord = Otp::where('mobile_number', $mobileNumber)
+        $otpRecord = Otp::where('mobile_number', $mobile)
             ->where('otp', $otp)
             ->where('is_verified', false)
             ->latest()
             ->first();
 
         if (!$otpRecord) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid OTP'
-            ], 401);
+            return $this->unauthorizedResponse('Invalid OTP.');
         }
 
         if ($otpRecord->isExpired()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'OTP has expired. Please request a new one.'
-            ], 401);
+            return $this->unauthorizedResponse('OTP has expired. Please request a new one.');
         }
 
-        // Mark OTP as verified
         $otpRecord->markAsVerified();
 
-        // Check if user exists
-        $user = User::where('mobile_number', $mobileNumber)->first();
-
+        $user = User::where('mobile_number', $mobile)->first();
         if (!$user) {
-            // Create temporary user (registration not complete)
             $user = User::create([
-                'mobile_number' => $mobileNumber,
-                'is_registration_complete' => false,
+                'mobile_number'             => $mobile,
+                'is_registration_complete'  => false,
             ]);
         }
 
-        // Generate token if user is already registered
         $token = null;
         if ($user->is_registration_complete) {
-            $token = base64_encode(json_encode([
-                'user_id' => $user->id,
-                'mobile_number' => $user->mobile_number,
-                'exp' => time() + (30 * 24 * 60 * 60) // 30 days
-            ]));
+            $token = $this->generateToken($user);
         }
 
-        // Generate token (you can use Sanctum or JWT here)
-        // For now, we'll return user data
-        return response()->json([
-            'success' => true,
-            'message' => 'OTP verified successfully',
-            'data' => [
-                'user' => [
-                    'id' => $user->id,
-                    'mobile_number' => $user->mobile_number,
-                    'is_registration_complete' => $user->is_registration_complete,
-                ],
-                'requires_registration' => !$user->is_registration_complete,
-                'token' => $token, // Token only if registration is complete
-            ]
-        ], 200);
+        return $this->successResponse([
+            'user' => [
+                'id'                        => $user->id,
+                'mobile_number'             => $user->mobile_number,
+                'is_registration_complete'  => $user->is_registration_complete,
+            ],
+            'requires_registration' => !$user->is_registration_complete,
+            'token'                 => $token,
+        ], 'OTP verified successfully');
     }
 
+    // ─── OTP: Resend ──────────────────────────────────────────────────────────
+
     /**
-     * Resend OTP
+     * POST /api/resend-otp
      */
-    public function resendOtp(Request $request)
+    public function resendOtp(SendOtpRequest $request): JsonResponse
     {
-        $validator = Validator::make($request->all(), [
-            'mobile_number' => 'required|string|size:10|regex:/^[0-9]{10}$/',
-        ]);
-
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid mobile number',
-                'errors' => $validator->errors()
-            ], 422);
-        }
-
-        // Call sendOtp logic
         return $this->sendOtp($request);
     }
 
+    // ─── Setup Shop ───────────────────────────────────────────────────────────
+
     /**
-     * Update shop details
+     * POST /api/update-shop-details
+     *
+     * Completes registration for a new user and issues the Bearer token.
      */
-    public function updateShopDetails(Request $request)
+    public function updateShopDetails(SetupShopRequest $request): JsonResponse
     {
-        // Get and normalize input
-        $input = $request->all();
-        
-        // Convert empty strings to null for optional fields
-        if (isset($input['shop_name']) && $input['shop_name'] === '') {
-            unset($input['shop_name']);
-        }
-        if (isset($input['shop_address']) && $input['shop_address'] === '') {
-            unset($input['shop_address']);
-        }
-        if (isset($input['business_type']) && $input['business_type'] === '') {
-            unset($input['business_type']);
+        $data = $request->validated();
+
+        // Strip empty strings from optional fields so they don't overwrite existing values
+        foreach (['shop_name', 'shop_address', 'business_type', 'gst_number'] as $field) {
+            if (isset($data[$field]) && $data[$field] === '') {
+                unset($data[$field]);
+            }
         }
 
-        $validator = Validator::make($input, [
-            'user_id' => 'required|integer|exists:users,id',
-            'shop_name' => 'sometimes|nullable|string|max:255',
-            'owner_name' => 'required|string|min:2|max:255',
-            'shop_address' => 'sometimes|nullable|string|max:1000',
-            'business_type' => 'sometimes|nullable|string|max:50',
-            'is_registration_complete' => 'required|boolean',
-        ]);
+        DB::beginTransaction();
+        try {
+            $user = User::findOrFail($data['user_id']);
 
-        // Custom validation for shop_address - if provided and not null, must be at least 10 characters
-        $validator->sometimes('shop_address', 'min:10', function ($input) {
-            return isset($input['shop_address']) && $input['shop_address'] !== null && $input['shop_address'] !== '';
-        });
+            $updateData = [
+                'owner_name'                => $data['owner_name'],
+                'is_registration_complete'  => $data['is_registration_complete'],
+            ];
 
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Validation failed',
-                'errors' => $validator->errors()
-            ], 422);
+            foreach (['shop_name', 'shop_address', 'business_type', 'gst_number'] as $field) {
+                if (array_key_exists($field, $data)) {
+                    $updateData[$field] = $data[$field];
+                }
+            }
+
+            $user->update($updateData);
+
+            // Bootstrap default settings for the shop on first-time setup
+            if ($data['is_registration_complete'] && !$user->setting()->exists()) {
+                Setting::create(['user_id' => $user->id]);
+            }
+
+            DB::commit();
+        } catch (\Throwable $e) {
+            DB::rollBack();
+            return $this->serverErrorResponse();
         }
 
-        $user = User::findOrFail($input['user_id']);
+        $token = $this->generateToken($user->fresh());
 
-        // Prepare update data - only include fields that are set
-        $updateData = [
-            'owner_name' => $input['owner_name'],
-            'is_registration_complete' => $input['is_registration_complete'],
-        ];
-
-        // Only add optional fields if they are provided
-        if (isset($input['shop_name'])) {
-            $updateData['shop_name'] = $input['shop_name'];
-        }
-        if (isset($input['shop_address'])) {
-            $updateData['shop_address'] = $input['shop_address'];
-        }
-        if (isset($input['business_type'])) {
-            $updateData['business_type'] = $input['business_type'];
-        }
-
-        $user->update($updateData);
-
-        // Generate JWT token (simple token for now, you can use Laravel Sanctum or JWT library)
-        $token = base64_encode(json_encode([
-            'user_id' => $user->id,
-            'mobile_number' => $user->mobile_number,
-            'exp' => time() + (30 * 24 * 60 * 60) // 30 days
-        ]));
-
-        return response()->json([
-            'success' => true,
-            'message' => 'Shop details updated successfully',
-            'data' => [
-                'user' => [
-                    'id' => $user->id,
-                    'mobile_number' => $user->mobile_number,
-                    'shop_name' => $user->shop_name,
-                    'owner_name' => $user->owner_name,
-                    'shop_address' => $user->shop_address,
-                    'business_type' => $user->business_type,
-                    'is_registration_complete' => $user->is_registration_complete,
-                ],
-                'token' => $token
-            ]
-        ], 200);
+        return $this->successResponse([
+            'user'  => [
+                'id'                        => $user->id,
+                'mobile_number'             => $user->mobile_number,
+                'shop_name'                 => $user->shop_name,
+                'owner_name'                => $user->owner_name,
+                'shop_address'              => $user->shop_address,
+                'business_type'             => $user->business_type,
+                'gst_number'                => $user->gst_number,
+                'is_registration_complete'  => $user->is_registration_complete,
+            ],
+            'token' => $token,
+        ], 'Shop details updated successfully');
     }
 
+    // ─── Token: Verify ────────────────────────────────────────────────────────
+
     /**
-     * Verify JWT Token
+     * POST /api/verify-token
      */
-    public function verifyToken(Request $request)
+    public function verifyToken(Request $request): JsonResponse
     {
         $validator = Validator::make($request->all(), [
             'token' => 'required|string',
         ]);
 
         if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Token is required',
-                'errors' => $validator->errors()
-            ], 422);
+            return $this->validationErrorResponse($validator->errors(), 'Token is required');
         }
 
         try {
-            $tokenData = json_decode(base64_decode($request->token), true);
-            
-            if (!$tokenData || !isset($tokenData['user_id']) || !isset($tokenData['exp'])) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Invalid token'
-                ], 401);
+            $payload = json_decode(base64_decode($request->token), true);
+
+            if (!$payload || !isset($payload['user_id'], $payload['exp'])) {
+                return $this->unauthorizedResponse('Invalid token.');
             }
 
-            // Check if token is expired
-            if ($tokenData['exp'] < time()) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Token has expired'
-                ], 401);
+            if ($payload['exp'] < time()) {
+                return $this->unauthorizedResponse('Token has expired.');
             }
 
-            // Get user
-            $user = User::find($tokenData['user_id']);
-
+            $user = User::find($payload['user_id']);
             if (!$user) {
-                return response()->json([
-                    'success' => false,
-                    'message' => 'User not found'
-                ], 401);
+                return $this->unauthorizedResponse('User not found.');
             }
 
-            return response()->json([
-                'success' => true,
-                'message' => 'Token is valid',
-                'data' => [
-                    'user' => [
-                        'id' => $user->id,
-                        'mobile_number' => $user->mobile_number,
-                        'shop_name' => $user->shop_name,
-                        'owner_name' => $user->owner_name,
-                        'shop_address' => $user->shop_address,
-                        'business_type' => $user->business_type,
-                        'is_registration_complete' => $user->is_registration_complete,
-                    ]
-                ]
-            ], 200);
-        } catch (\Exception $e) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Invalid token'
-            ], 401);
+            return $this->successResponse([
+                'user' => [
+                    'id'                        => $user->id,
+                    'mobile_number'             => $user->mobile_number,
+                    'shop_name'                 => $user->shop_name,
+                    'owner_name'                => $user->owner_name,
+                    'shop_address'              => $user->shop_address,
+                    'business_type'             => $user->business_type,
+                    'gst_number'                => $user->gst_number,
+                    'is_registration_complete'  => $user->is_registration_complete,
+                ],
+            ], 'Token is valid');
+        } catch (\Throwable) {
+            return $this->unauthorizedResponse('Invalid token.');
         }
     }
-}
 
+    // ─── Dev Only ─────────────────────────────────────────────────────────────
+
+    /**
+     * POST /api/dev/auto-login  (local env only)
+     */
+    public function devAutoLogin(Request $request): JsonResponse
+    {
+        if (!app()->environment('local')) {
+            return $this->unauthorizedResponse();
+        }
+
+        $mobile = '9999999999';
+        $user   = User::firstOrCreate(
+            ['mobile_number' => $mobile],
+            [
+                'is_registration_complete' => true,
+                'owner_name'               => 'Dev Admin',
+                'shop_name'                => 'Dev Shop',
+            ]
+        );
+
+        return $this->successResponse([
+            'user'  => [
+                'id'                        => $user->id,
+                'mobile_number'             => $user->mobile_number,
+                'is_registration_complete'  => $user->is_registration_complete,
+            ],
+            'requires_registration' => false,
+            'token'                 => $this->generateToken($user),
+        ], 'Dev auto-login successful');
+    }
+
+    // ─── Private Helpers ──────────────────────────────────────────────────────
+
+    /**
+     * Generate the base64-encoded bearer token.
+     * Token is valid for 30 days.
+     */
+    private function generateToken(User $user): string
+    {
+        return base64_encode(json_encode([
+            'user_id'       => $user->id,
+            'mobile_number' => $user->mobile_number,
+            'exp'           => time() + (30 * 24 * 60 * 60),
+        ]));
+    }
+}

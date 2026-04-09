@@ -2,80 +2,63 @@
 
 namespace App\Http\Controllers;
 
+use App\Http\Requests\Category\StoreCategoryRequest;
 use App\Models\Category;
+use App\Traits\ApiResponse;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\Validator;
 
 class CategoryController extends Controller
 {
-    public function index(Request $request)
+    use ApiResponse;
+
+    /**
+     * GET /api/categories
+     */
+    public function index(Request $request): JsonResponse
     {
-        $user = $request->user();
-        $categories = Category::where('user_id', $user->id)
+        $categories = Category::where('user_id', $request->user()->id)
             ->orderBy('name')
             ->get();
 
-        return response()->json([
-            'success' => true,
-            'data' => $categories,
-        ]);
+        return $this->successResponse($categories, 'Categories retrieved successfully');
     }
 
-    public function store(Request $request)
+    /**
+     * POST /api/categories
+     */
+    public function store(StoreCategoryRequest $request): JsonResponse
     {
-        $validator = Validator::make($request->all(), [
-            'name' => 'required|string|max:100',
-        ]);
+        $name = trim($request->validated()['name']);
 
-        if ($validator->fails()) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Validation failed',
-                'errors' => $validator->errors(),
-            ], 422);
-        }
-
-        $user = $request->user();
-        $name = trim($request->name);
-        if ($name === '') {
-            return response()->json([
-                'success' => false,
-                'message' => 'Category name is required',
-            ], 422);
-        }
-
-        $exists = Category::where('user_id', $user->id)
-            ->whereRaw('LOWER(name) = ?', [strtolower($name)])
+        // Case-insensitive duplicate guard (Rule::unique doesn't handle COLLATE)
+        $exists = Category::where('user_id', $request->user()->id)
+            ->whereRaw('LOWER(name) = ?', [mb_strtolower($name)])
             ->exists();
+
         if ($exists) {
-            return response()->json([
-                'success' => false,
-                'message' => 'This category already exists',
-            ], 422);
+            return $this->validationErrorResponse(
+                ['name' => ['This category already exists.']],
+                'Validation failed'
+            );
         }
 
         $category = Category::create([
-            'user_id' => $user->id,
-            'name' => $name,
+            'user_id' => $request->user()->id,
+            'name'    => $name,
         ]);
 
-        return response()->json([
-            'success' => true,
-            'data' => $category,
-        ], 201);
+        return $this->createdResponse($category, 'Category created successfully');
     }
 
-    public function destroy(Request $request, $id)
+    /**
+     * DELETE /api/categories/{id}
+     */
+    public function destroy(Request $request, string $id): JsonResponse
     {
-        $user = $request->user();
-        $category = Category::where('user_id', $user->id)->find($id);
-        if (!$category) {
-            return response()->json([
-                'success' => false,
-                'message' => 'Category not found',
-            ], 404);
-        }
+        $category = Category::where('user_id', $request->user()->id)->findOrFail($id);
         $category->delete();
-        return response()->json(['success' => true]);
+
+        return $this->successResponse(null, 'Category deleted successfully');
     }
 }
