@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Http\Requests\Product\StoreProductRequest;
 use App\Http\Requests\Product\UpdateProductRequest;
 use App\Models\Product;
+use App\Models\Unit;
 use App\Traits\ApiResponse;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
@@ -61,6 +62,7 @@ class ProductController extends Controller
     public function store(StoreProductRequest $request): JsonResponse
     {
         $data = $request->validated();
+        $data = $this->resolveUnitAction($data, $request->user()->id);
 
         $product = Product::create(array_merge($data, [
             'user_id'             => $request->user()->id,
@@ -94,12 +96,42 @@ class ProductController extends Controller
     public function update(UpdateProductRequest $request, string $id): JsonResponse
     {
         $product = Product::where('user_id', $request->user()->id)->findOrFail($id);
-        $product->update($request->validated());
+        $data    = $this->resolveUnitAction($request->validated(), $request->user()->id);
+        $product->update($data);
 
         return $this->successResponse(
             $product->fresh()->load(['productCategory:id,name', 'unit:id,name,short_name']),
             'Product updated successfully'
         );
+    }
+
+    /**
+     * Convert `unit_action` (default|remove) to a resolved `unit_id` integer or null.
+     * 'default' → use the user's first Piece/count unit, fallback to any first unit.
+     * 'remove'  → set unit_id to null (no unit).
+     */
+    private function resolveUnitAction(array $data, int $userId): array
+    {
+        if (!array_key_exists('unit_action', $data)) {
+            return $data;
+        }
+
+        $action = $data['unit_action'] ?? 'default';
+        unset($data['unit_action']);
+
+        if ($action === 'remove') {
+            $data['unit_id'] = null;
+        } else {
+            // 'default': prefer Piece (pcs), fallback to first available unit
+            $unit = Unit::where('user_id', $userId)
+                ->where('short_name', 'pcs')
+                ->first()
+                ?? Unit::where('user_id', $userId)->first();
+
+            $data['unit_id'] = $unit?->id;
+        }
+
+        return $data;
     }
 
     /**

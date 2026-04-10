@@ -89,6 +89,8 @@ Route::middleware('auth.token')->group(function () {
     Route::delete('/categories/{id}',[CategoryController::class, 'destroy']);
 
     // Units (pcs, kg, ltr, etc.)
+    // seed-defaults must be before apiResource to avoid matching as {unit} show route
+    Route::post('/units/seed-defaults', [UnitController::class, 'seedDefaults']);
     Route::apiResource('units', UnitController::class);
 
     // Products

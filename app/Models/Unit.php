@@ -15,6 +15,13 @@ class Unit extends Model
         'user_id',
         'name',
         'short_name',
+        'type',              // mass | volume | count | length | other
+        'base_unit',         // reference unit short_name (e.g. kg, l, pcs, m)
+        'conversion_factor', // 1 [this unit] = conversion_factor [base_unit]
+    ];
+
+    protected $casts = [
+        'conversion_factor' => 'float',
     ];
 
     // ─── Relationships ────────────────────────────────────────────────────────

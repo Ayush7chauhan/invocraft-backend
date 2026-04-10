@@ -28,7 +28,7 @@ class UpdateProductRequest extends BaseApiRequest
                 Rule::unique('products')->where('user_id', $userId)->ignore($productId)->whereNull('deleted_at'),
             ],
             'category_id'         => ['nullable', 'integer', 'exists:categories,id'],
-            'unit_id'             => ['nullable', 'integer', 'exists:units,id'],
+            'unit_action'         => ['nullable', 'string', 'in:default,remove'],
             'purchase_price'      => ['sometimes', 'numeric', 'min:0'],
             'selling_price'       => ['sometimes', 'numeric', 'min:0'],
             'stock_quantity'      => ['nullable', 'integer', 'min:0'],

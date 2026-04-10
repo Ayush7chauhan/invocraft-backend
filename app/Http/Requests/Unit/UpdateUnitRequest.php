@@ -20,7 +20,10 @@ class UpdateUnitRequest extends BaseApiRequest
                 'max:100',
                 Rule::unique('units')->where('user_id', $userId)->ignore($unitId),
             ],
-            'short_name' => ['sometimes', 'required', 'string', 'max:20'],
+            'short_name'        => ['sometimes', 'required', 'string', 'max:20'],
+            'type'              => ['sometimes', 'nullable', 'string', 'in:mass,volume,count,length,other'],
+            'base_unit'         => ['sometimes', 'nullable', 'string', 'max:20'],
+            'conversion_factor' => ['sometimes', 'nullable', 'numeric', 'min:0.000001'],
         ];
     }
 }

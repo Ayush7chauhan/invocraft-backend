@@ -18,7 +18,10 @@ class StoreUnitRequest extends BaseApiRequest
                 'max:100',
                 Rule::unique('units')->where('user_id', $userId),
             ],
-            'short_name' => ['required', 'string', 'max:20'],
+            'short_name'         => ['required', 'string', 'max:20'],
+            'type'               => ['nullable', 'string', 'in:mass,volume,count,length,other'],
+            'base_unit'          => ['nullable', 'string', 'max:20'],
+            'conversion_factor'  => ['nullable', 'numeric', 'min:0.000001'],
         ];
     }
 
